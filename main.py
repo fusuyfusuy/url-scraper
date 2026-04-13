@@ -1,8 +1,10 @@
 import csv
+import json
 import time
 import threading
 import queue
 import requests
+from pathlib import Path
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -22,6 +24,7 @@ def crawl_website(
     link_filter="all",       # "all" | "internal" | "external"
     errors_only=False,       # only rows with non-2xx / error status
     no_found_on=False,       # omit Found_On column
+    save_text=True,
 ):
     target_domain = urlparse(start_url).netloc
 
@@ -33,6 +36,9 @@ def crawl_website(
 
     results_lock = threading.Lock()
     results = []
+
+    page_data_lock = threading.Lock()
+    page_data = {}  # url -> page_content dict
 
     # Track in-flight URLs so we don't double-queue them
     queued_lock = threading.Lock()
@@ -50,6 +56,7 @@ def crawl_website(
         status_code = None
         new_urls = []
         external_urls = []
+        page_content = None
 
         try:
             response = requests.get(current_url, timeout=timeout)
@@ -57,22 +64,40 @@ def crawl_website(
 
             content_type = response.headers.get("Content-Type", "")
             if "text/html" not in content_type:
-                return current_url, status_code, new_urls, external_urls
+                return current_url, status_code, new_urls, external_urls, page_content
 
             soup = BeautifulSoup(response.text, "html.parser")
 
             for link in soup.find_all("a", href=True):
                 full_url = normalize_url(urljoin(current_url, link["href"]))
-
                 if not full_url.startswith("http"):
                     continue
-
                 link_domain = urlparse(full_url).netloc
-
                 if link_domain == target_domain:
                     new_urls.append(full_url)
                 else:
                     external_urls.append(full_url)
+
+            # Extract page content
+            title = soup.title.string.strip() if soup.title and soup.title.string else ""
+            meta_desc_tag = soup.find("meta", attrs={"name": "description"})
+            meta_description = meta_desc_tag["content"].strip() if meta_desc_tag and meta_desc_tag.get("content") else ""
+            h1_tag = soup.find("h1")
+            h1 = h1_tag.get_text(strip=True) if h1_tag else ""
+            headings = [tag.get_text(strip=True) for tag in soup.find_all(["h1", "h2", "h3"])]
+
+            # Remove non-visible elements before extracting body text
+            for tag in soup(["script", "style", "noscript", "header", "footer", "nav"]):
+                tag.decompose()
+            body_text = " ".join(soup.get_text(separator=" ").split())
+
+            page_content = {
+                "title": title,
+                "meta_description": meta_description,
+                "h1": h1,
+                "headings": headings,
+                "body_text": body_text,
+            }
 
         except requests.exceptions.Timeout:
             status_code = "TIMEOUT"
@@ -84,7 +109,7 @@ def crawl_website(
             status_code = f"ERROR: {e}"
             print(f"  ✗ Failed: {current_url} — {e}")
 
-        return current_url, status_code, new_urls, external_urls
+        return current_url, status_code, new_urls, external_urls, page_content
 
     def worker():
         while True:
@@ -100,7 +125,11 @@ def crawl_website(
                 visited_urls.add(current_url)
 
             print(f"Crawling: {current_url}")
-            url, status_code, new_urls, external_urls = fetch(current_url)
+            url, status_code, new_urls, external_urls, page_content = fetch(current_url)
+
+            if save_text and page_content is not None:
+                with page_data_lock:
+                    page_data[url] = page_content
 
             with results_lock:
                 results.append({
@@ -175,6 +204,12 @@ def crawl_website(
         writer.writeheader()
         writer.writerows(filtered)
 
+    if save_text and page_data:
+        json_file = str(Path(output_file).with_suffix(".json"))
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(page_data, f, ensure_ascii=False, indent=2)
+        print(f"Page content  : {json_file}")
+
     internal = [r for r in unique_results if r["Link_Type"] == "Internal"]
     external = [r for r in unique_results if r["Link_Type"] == "External"]
     errors = [r for r in unique_results if _is_error(r)]
@@ -248,6 +283,11 @@ def main():
         action="store_true",
         help="Omit the Found_On column from the CSV",
     )
+    output_group.add_argument(
+        "--no-text",
+        action="store_true",
+        help="Skip page content extraction and do not write the JSON file",
+    )
 
     args = parser.parse_args()
     if args.output == "results.csv":
@@ -262,6 +302,7 @@ def main():
         link_filter=args.link_filter,
         errors_only=args.errors_only,
         no_found_on=args.no_found_on,
+        save_text=not args.no_text,
     )
 
 

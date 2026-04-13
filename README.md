@@ -24,6 +24,22 @@ Exports a `results.csv` file with columns:
 | `Link_Type` | `Internal` or `External` |
 | `Found_On` | The page where this URL was discovered (empty for the start URL) |
 
+### Page content (`<domain>.json`)
+
+Saved alongside the CSV for all internal `text/html` pages. Keyed by URL:
+
+```json
+{
+  "https://example.com/about": {
+    "title": "About Us",
+    "meta_description": "Learn more about our team.",
+    "h1": "Our Story",
+    "headings": ["Our Story", "The Team", "Contact"],
+    "body_text": "Full visible text content of the page..."
+  }
+}
+```
+
 ## Requirements
 
 - Python 3.11+
@@ -60,6 +76,7 @@ uv run main.py <url> [options]
 | `--filter [all\|internal\|external]` | Only include the specified link type in the CSV (default: `all`) |
 | `--errors-only` | Only export URLs with error status codes (4xx, 5xx, timeouts) |
 | `--no-found-on` | Omit the `Found_On` column from the CSV |
+| `--no-text` | Skip page content extraction, do not write the JSON file |
 
 ### Examples
 
@@ -81,4 +98,7 @@ uv run main.py https://example.com -w 5 -d 1.0
 
 # Faster crawl with longer timeout for slow servers
 uv run main.py https://example.com -w 20 --timeout 10
+
+# Crawl without saving page content
+uv run main.py https://example.com --no-text
 ```
